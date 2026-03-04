@@ -1,0 +1,12 @@
+# repo-ctl configuration
+# Copy to /opt/auto-cmd/repo-ctl/config/repo-ctl.yml
+
+github:
+  token: "ghp_xxxxxxxxxxxx"  # PAT with repo scope
+  org: k4rlski
+
+# Stale RAG threshold (days)
+rag_stale_days: 14
+
+# SSH user for check-sync (server access)
+ssh_user: root
