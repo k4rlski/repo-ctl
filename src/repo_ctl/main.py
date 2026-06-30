@@ -73,7 +73,7 @@ def resolve_repos(target: str, gh: GitHubClient) -> List[str]:
 
 
 @click.group()
-@click.version_option(version="0.1.0", prog_name="repo-ctl")
+@click.version_option(version="0.2.0", prog_name="repo-ctl")
 @click.option("--config", "-c", default=None, help="Config file path")
 @click.pass_context
 def cli(ctx, config):
@@ -246,16 +246,7 @@ def get_state(obj, target, no_db, no_server):
     click.echo(f"\n{'SLUG':<20} {'STATUS':<9} {'GITHUB':<8} {'SERVER':<22} {'CORE-V5':<12} {'CURRENT'}")
     click.echo("-" * 90)
     for slug in slugs:
-        if no_server:
-            reg.REGISTRY.setdefault(slug, {})  # ensure resolvable
-        row = scanmod.build_row(slug)
-        if no_server:
-            # blank the server plane if explicitly skipped
-            for k in ("srv_exists", "srv_is_git"):
-                row[k] = 0
-            for k in ("srv_branch", "srv_head_sha", "srv_dirty", "srv_ahead", "srv_behind"):
-                row[k] = None
-            row["alignment_status"], row["notes"] = dbmod.compute_status(row)
+        row = scanmod.build_row(slug, skip_server=no_server)
         rows.append(row)
 
         icon = ALIGN_ICON.get(row["alignment_status"], "?")

@@ -14,20 +14,19 @@ from .ssh_probe import probe_server
 from .db import compute_status
 
 
-def build_row(slug):
+_EMPTY = {"path": None, "exists": False, "is_git": False, "branch": None,
+          "head_sha": None, "dirty": None, "ahead": None, "behind": None}
+
+
+def build_row(slug, skip_server=False):
     r = registry.resolve(slug)
     gh = ls_remote_head(r["github_ssh"])
     lf = probe_local(r["local_final"])
-    lc = probe_local(r["local_current"]) if r["local_current"] else {
-        "path": None, "exists": False, "is_git": False, "branch": None,
-        "head_sha": None, "dirty": None, "ahead": None, "behind": None,
-    }
-    if r["server_host"]:
+    lc = probe_local(r["local_current"]) if r["local_current"] else dict(_EMPTY)
+    if r["server_host"] and not skip_server:
         srv = probe_server(r["server_host"], r["server_path"], r["ssh_user"])
     else:
-        srv = {"host": None, "path": None, "exists": False, "is_git": False,
-               "branch": None, "head_sha": None, "dirty": None,
-               "ahead": None, "behind": None}
+        srv = dict(_EMPTY, host=r["server_host"], path=r["server_path"])
 
     row = {
         "slug": slug,
