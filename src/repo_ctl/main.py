@@ -32,7 +32,8 @@ def _default_config_path() -> Path:
 CONFIG_FILE = _default_config_path()
 
 STATUS_ICON = {"ok": "✅", "warn": "⚠️ ", "fail": "❌"}
-ALIGN_ICON = {"aligned": "✅", "drift": "⚠️ ", "missing": "❌", "unknown": "❔", "stale": "⚠️ "}
+ALIGN_ICON = {"aligned": "✅", "drift": "⚠️ ", "uncloned": "📥", "absent": "⛔",
+              "missing": "❌", "unknown": "❔", "stale": "⚠️ "}
 
 
 def load_config(path: str = None) -> dict:
@@ -73,7 +74,7 @@ def resolve_repos(target: str, gh: GitHubClient) -> List[str]:
 
 
 @click.group()
-@click.version_option(version="0.2.0", prog_name="repo-ctl")
+@click.version_option(version="0.3.0", prog_name="repo-ctl")
 @click.option("--config", "-c", default=None, help="Config file path")
 @click.pass_context
 def cli(ctx, config):
@@ -263,10 +264,10 @@ def get_state(obj, target, no_db, no_server):
         click.echo(f"{slug:<20} {icon} {row['alignment_status']:<7} {_sha(row['gh_head_sha']):<8} "
                    f"{srv:<22} {lf:<12} {lc}")
 
-    n_align = sum(1 for r in rows if r["alignment_status"] == "aligned")
-    n_drift = sum(1 for r in rows if r["alignment_status"] == "drift")
-    n_miss = sum(1 for r in rows if r["alignment_status"] == "missing")
-    click.echo(f"\n{len(rows)} repos | aligned {n_align}  drift {n_drift}  missing {n_miss}")
+    from collections import Counter
+    dist = Counter(r["alignment_status"] for r in rows)
+    summary = "  ".join(f"{k} {dist[k]}" for k in sorted(dist))
+    click.echo(f"\n{len(rows)} repos | {summary}")
 
     if no_db:
         click.echo("(--no-db: not written to dbx)")
@@ -283,6 +284,61 @@ def get_state(obj, target, no_db, no_server):
             for r in rows:
                 dbmod.upsert(conn, r)
         click.echo(f"Wrote {len(rows)} rows to infra_ctl.repo_alignment")
+    except Exception as e:
+        raise click.ClickException(f"DB write failed: {e}")
+
+
+@cli.command("refresh-alignment")
+@click.option("--slug", required=True, help="Single tool slug to re-scan")
+@click.option("--metadata-only", is_flag=True,
+              help="Refresh only RAG/tool-page/date metadata (no git re-probe)")
+@click.option("--no-server", is_flag=True, help="Skip the server (SSH) plane")
+@click.option("--no-db", is_flag=True, help="Scan + print only; do not write to dbx")
+@click.pass_obj
+def refresh_alignment(obj, slug, metadata_only, no_server, no_db):
+    """One-off single-repo alignment re-scan -> dbx (friendly alias over get-state)."""
+    if metadata_only:
+        row = scanmod.build_metadata_row(slug)
+        click.echo(f"\n{slug} (metadata-only)")
+        click.echo(f"  rag_name:           {row.get('rag_name')}")
+        click.echo(f"  rag_link:           {row.get('rag_link')}")
+        click.echo(f"  rag_last_updated:   {row.get('rag_last_updated')}")
+        click.echo(f"  rag_published_date: {row.get('rag_published_date')}")
+        click.echo(f"  rag_file_mtime:     {row.get('rag_file_mtime')}")
+        click.echo(f"  tool_page_link:     {row.get('tool_page_link')}")
+    else:
+        row = scanmod.build_row(slug, skip_server=no_server)
+        icon = ALIGN_ICON.get(row["alignment_status"], "?")
+        click.echo(f"\n{slug}: {icon} {row['alignment_status']}  "
+                   f"gh={_sha(row['gh_head_sha'])} "
+                   f"core-v5={_sha(row['lf_head_sha'])} "
+                   f"srv={_sha(row['srv_head_sha'])}")
+        if row.get("notes"):
+            click.echo(f"  notes: {row['notes']}")
+        click.echo(f"  tool_page_link: {row.get('tool_page_link')}")
+        click.echo(f"  rag_link:       {row.get('rag_link')}")
+
+    if no_db:
+        click.echo("(--no-db: not written to dbx)")
+        return
+
+    cfg = load_config_soft(obj.get("config_path"))
+    dbx = cfg.get("dbx")
+    if not dbx:
+        raise click.ClickException(
+            "No [dbx] config found; cannot persist. Use --no-db, or add a dbx: section "
+            f"to {CONFIG_FILE}")
+    try:
+        with dbmod.connect(dbx) as conn:
+            if metadata_only:
+                n = dbmod.update_metadata(conn, row)
+                if n:
+                    click.echo(f"Updated metadata for {slug} (1 row)")
+                else:
+                    click.echo(f"No existing row for {slug}; run a full get-state first")
+            else:
+                dbmod.upsert(conn, row)
+                click.echo(f"Upserted {slug} into infra_ctl.repo_alignment")
     except Exception as e:
         raise click.ClickException(f"DB write failed: {e}")
 

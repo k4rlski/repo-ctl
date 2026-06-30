@@ -9,12 +9,26 @@ GitHubClient when a read-only token is configured.
 import subprocess
 
 
+_ABSENT_HINTS = (
+    "repository not found",
+    "does not exist",
+    "not found",
+    "access denied",
+)
+
+
 def ls_remote_head(ssh_url, timeout=20):
     """
-    Return {'default_branch': str|None, 'head_sha': str|None} for a repo via SSH.
-    Tolerant: returns Nones on any failure.
+    Return {'default_branch', 'head_sha', 'probe_ok'} for a repo via SSH.
+
+    `probe_ok` is True when we got a *definitive* answer from GitHub: either the
+    ls-remote succeeded, or it failed in a way that means the repo is genuinely
+    absent (e.g. "Repository not found"). It is False on a transient/ambiguous
+    failure (network, timeout, auth hiccup) — callers must NOT treat that as an
+    absent plane (see compute_status; avoids a false `aligned`).
+    Tolerant: returns Nones for the shas on any failure.
     """
-    out = {"default_branch": None, "head_sha": None}
+    out = {"default_branch": None, "head_sha": None, "probe_ok": False}
     try:
         r = subprocess.run(
             ["git", "ls-remote", "--symref", ssh_url, "HEAD"],
@@ -22,7 +36,11 @@ def ls_remote_head(ssh_url, timeout=20):
             stdin=subprocess.DEVNULL,
         )
         if r.returncode != 0:
+            err = (r.stderr or "").lower()
+            # Definitive "repo absent" answers count as a successful probe.
+            out["probe_ok"] = any(h in err for h in _ABSENT_HINTS)
             return out
+        out["probe_ok"] = True
         for line in r.stdout.splitlines():
             line = line.strip()
             if line.startswith("ref:") and line.endswith("HEAD"):
@@ -34,5 +52,6 @@ def ls_remote_head(ssh_url, timeout=20):
                 if len(sha) == 40:
                     out["head_sha"] = sha
     except Exception:
+        # transient (timeout / exception): probe_ok stays False
         pass
     return out

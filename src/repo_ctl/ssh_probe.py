@@ -18,7 +18,8 @@ _REMOTE = (
     'echo "BRANCH=$(git -C "$p" rev-parse --abbrev-ref HEAD 2>/dev/null)"; '
     'echo "HEAD=$(git -C "$p" rev-parse HEAD 2>/dev/null)"; '
     'echo "DIRTY=$(git -C "$p" status --porcelain 2>/dev/null | grep -c .)"; '
-    'echo "ABCNT=$(git -C "$p" rev-list --left-right --count HEAD...@{{u}} 2>/dev/null)"'
+    'echo "ABCNT=$(git -C "$p" rev-list --left-right --count HEAD...@{{u}} 2>/dev/null)"; '
+    'echo "CDATE=$(git -C "$p" log -1 --format=%cI 2>/dev/null)"'
 )
 
 
@@ -26,7 +27,7 @@ def probe_server(host, path, ssh_user="root", timeout=20):
     """Return a dict of git state for host:path. Tolerant of failures."""
     state = {
         "host": host, "path": path, "exists": False, "is_git": False,
-        "branch": None, "head_sha": None, "dirty": None,
+        "branch": None, "head_sha": None, "head_date": None, "dirty": None,
         "ahead": None, "behind": None, "reachable": False,
     }
     if not host or not path:
@@ -53,7 +54,8 @@ def probe_server(host, path, ssh_user="root", timeout=20):
 
     state["exists"] = kv.get("EXISTS") == "1"
     state["is_git"] = kv.get("ISGIT") == "1"
-    state["branch"] = kv.get("BRANCH") or None
+    br = kv.get("BRANCH") or None
+    state["branch"] = "(detached)" if br == "HEAD" else br
     head = kv.get("HEAD") or ""
     state["head_sha"] = head[:40] if head else None
     if kv.get("DIRTY", "").isdigit():
@@ -61,4 +63,6 @@ def probe_server(host, path, ssh_user="root", timeout=20):
     ab = kv.get("ABCNT", "").split()
     if len(ab) == 2 and ab[0].isdigit() and ab[1].isdigit():
         state["ahead"], state["behind"] = int(ab[0]), int(ab[1])
+    from .walker import iso_to_mysql
+    state["head_date"] = iso_to_mysql(kv.get("CDATE"))
     return state

@@ -41,12 +41,12 @@ repo-ctl audit --target bkup-ctl,job-board-ctl,receipt-ctl
 
 ## Deployment
 
-**Lives on:** `claw.auto-ctl.io`
-**Install path:** `/opt/auto-cmd/repo-ctl/`
+**Lives on:** `rodan.auto-cmd.io`
+**Install path:** `/opt/repo-ctl/`
 
 ```bash
-git clone git@github.com:k4rlski/repo-ctl.git /opt/auto-cmd/repo-ctl
-cd /opt/auto-cmd/repo-ctl
+git clone git@github.com:k4rlski/repo-ctl.git /opt/repo-ctl
+cd /opt/repo-ctl
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
