@@ -1,0 +1,11 @@
+# Secrets / local config (never commit live creds)
+config/repo-ctl.yml
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.eggs/
+build/
+dist/

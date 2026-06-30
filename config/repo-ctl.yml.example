@@ -1,12 +1,28 @@
 # repo-ctl configuration
-# Copy to /opt/auto-cmd/repo-ctl/config/repo-ctl.yml
+# Copy to config/repo-ctl.yml (gitignored) and fill in.
+# get-state is TOKEN-FREE for GitHub (uses `git ls-remote` over your SSH key);
+# the github.token below is optional and only used by the legacy audit commands.
 
 github:
-  token: "ghp_xxxxxxxxxxxx"  # PAT with repo scope
+  token: ""          # OPTIONAL: read-only fine-grained PAT for API extras (commit dates, issues)
   org: k4rlski
 
-# Stale RAG threshold (days)
+# Stale RAG threshold (days) for the legacy audit commands
 rag_stale_days: 14
 
-# SSH user for check-sync (server access)
+# SSH user for the server (check-sync) plane
 ssh_user: root
+
+# dbx / infra_ctl connection for `get-state` persistence.
+# OSIRIS (authoritative scan): tunnel through claw -> arrives at dbx as 127.0.0.1.
+dbx:
+  via_claw_tunnel: true
+  tunnel_host: root@claw.auto-ctl.io
+  local_port: 13307
+  user: perm_ctl
+  password: ""       # infra_ctl password (perm_ctl)
+  database: infra_ctl
+  # RODAN (direct) alternative — needs a perm_ctl@<rodan-ip> grant (Option A):
+  #   via_claw_tunnel: false
+  #   host: dbx.auto-ops.net
+  #   port: 3306

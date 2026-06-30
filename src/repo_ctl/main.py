@@ -8,12 +8,32 @@ from pathlib import Path
 from typing import List
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from repo_ctl.github_client import GitHubClient, ALL_REPOS
+from repo_ctl.github_client import GitHubClient
 from repo_ctl import checks as chk
+from repo_ctl import registry as reg
+from repo_ctl import scan as scanmod
+from repo_ctl import db as dbmod
 
-CONFIG_FILE = Path(os.environ.get("REPO_CTL_CONFIG", "/opt/auto-cmd/repo-ctl/config/repo-ctl.yml"))
+
+def _default_config_path() -> Path:
+    """Search REPO_CTL_CONFIG, the rodan deploy path, then the repo-local config."""
+    env = os.environ.get("REPO_CTL_CONFIG")
+    if env:
+        return Path(env)
+    for cand in (
+        Path("/opt/repo-ctl/config/repo-ctl.yml"),
+        Path(__file__).resolve().parents[2] / "config" / "repo-ctl.yml",
+    ):
+        if cand.exists():
+            return cand
+    return Path("/opt/repo-ctl/config/repo-ctl.yml")
+
+
+CONFIG_FILE = _default_config_path()
 
 STATUS_ICON = {"ok": "✅", "warn": "⚠️ ", "fail": "❌"}
+ALIGN_ICON = {"aligned": "✅", "drift": "⚠️ ", "missing": "❌", "unknown": "❔", "stale": "⚠️ "}
+
 
 def load_config(path: str = None) -> dict:
     p = Path(path) if path else CONFIG_FILE
@@ -25,6 +45,19 @@ def load_config(path: str = None) -> dict:
     if token:
         return {"github": {"token": token, "org": "k4rlski"}}
     raise click.ClickException(f"Config not found at {p} and GITHUB_TOKEN env not set")
+
+
+def load_config_soft(path: str = None) -> dict:
+    """Like load_config but returns {} instead of raising (for token-free commands)."""
+    p = Path(path) if path else CONFIG_FILE
+    if p.exists():
+        with open(p) as f:
+            return yaml.safe_load(f) or {}
+    return {}
+
+
+def _sha(s):
+    return s[:7] if s else "-"
 
 
 def make_client(cfg: dict) -> GitHubClient:
@@ -194,6 +227,73 @@ def audit(obj, target):
                 click.echo(f"                   {line}")
 
     click.echo(f"\n{'':=<75}")
+
+
+@cli.command("get-state")
+@click.option("--target", default="all", show_default=True,
+              help="Comma-separated slugs, or 'all' (registry + core-v5 dirs)")
+@click.option("--no-db", is_flag=True, help="Scan + print only; do not write to dbx")
+@click.option("--no-server", is_flag=True, help="Skip the server (SSH) plane")
+@click.pass_obj
+def get_state(obj, target, no_db, no_server):
+    """Read-only alignment sweep: core-v5 / Local-current / Server / GitHub -> dbx."""
+    if target == "all":
+        slugs = reg.default_targets()
+    else:
+        slugs = [t.strip() for t in target.split(",") if t.strip()]
+
+    rows = []
+    click.echo(f"\n{'SLUG':<20} {'STATUS':<9} {'GITHUB':<8} {'SERVER':<22} {'CORE-V5':<12} {'CURRENT'}")
+    click.echo("-" * 90)
+    for slug in slugs:
+        if no_server:
+            reg.REGISTRY.setdefault(slug, {})  # ensure resolvable
+        row = scanmod.build_row(slug)
+        if no_server:
+            # blank the server plane if explicitly skipped
+            for k in ("srv_exists", "srv_is_git"):
+                row[k] = 0
+            for k in ("srv_branch", "srv_head_sha", "srv_dirty", "srv_ahead", "srv_behind"):
+                row[k] = None
+            row["alignment_status"], row["notes"] = dbmod.compute_status(row)
+        rows.append(row)
+
+        icon = ALIGN_ICON.get(row["alignment_status"], "?")
+        srv = "-"
+        if row["server_host"]:
+            host = row["server_host"].split(".")[0]
+            ssha = _sha(row["srv_head_sha"])
+            dd = f"*{row['srv_dirty']}" if (row.get("srv_dirty") or 0) else ""
+            srv = f"{host} {ssha}{dd}" if row["srv_is_git"] else f"{host} (none)"
+        lf = _sha(row["lf_head_sha"]) + (f"*{row['lf_dirty']}" if (row.get("lf_dirty") or 0) else "")
+        if not row["lf_is_git"]:
+            lf = "(none)"
+        lc = _sha(row["lc_head_sha"]) if row["lc_is_git"] else "-"
+        click.echo(f"{slug:<20} {icon} {row['alignment_status']:<7} {_sha(row['gh_head_sha']):<8} "
+                   f"{srv:<22} {lf:<12} {lc}")
+
+    n_align = sum(1 for r in rows if r["alignment_status"] == "aligned")
+    n_drift = sum(1 for r in rows if r["alignment_status"] == "drift")
+    n_miss = sum(1 for r in rows if r["alignment_status"] == "missing")
+    click.echo(f"\n{len(rows)} repos | aligned {n_align}  drift {n_drift}  missing {n_miss}")
+
+    if no_db:
+        click.echo("(--no-db: not written to dbx)")
+        return
+
+    cfg = load_config_soft(obj.get("config_path"))
+    dbx = cfg.get("dbx")
+    if not dbx:
+        raise click.ClickException(
+            "No [dbx] config found; cannot persist. Use --no-db, or add a dbx: section "
+            f"to {CONFIG_FILE}")
+    try:
+        with dbmod.connect(dbx) as conn:
+            for r in rows:
+                dbmod.upsert(conn, r)
+        click.echo(f"Wrote {len(rows)} rows to infra_ctl.repo_alignment")
+    except Exception as e:
+        raise click.ClickException(f"DB write failed: {e}")
 
 
 if __name__ == "__main__":
