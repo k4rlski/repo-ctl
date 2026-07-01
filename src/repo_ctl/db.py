@@ -193,10 +193,11 @@ def upsert(conn, row):
     """
     Idempotent upsert of one repo_alignment row (dict keyed by COLUMNS).
 
-    COLUMNS deliberately EXCLUDES the manually-curated fields (hidden, statrepo,
-    rolerepo, statprod, tooltype): they are never inserted or updated by a scan,
-    so DB defaults apply on first insert (hidden=0, statrepo/rolerepo/statprod/
-    tooltype NULL) and manual values survive every subsequent scan.
+    COLUMNS deliberately EXCLUDES the manually-curated / operator-editable fields
+    (hidden, statrepo, rolerepo, statprod, tooltype, proposed_upgrades,
+    enhancement_issue_number, enhancement_issue_url, clonelocal): they are never
+    inserted or updated by a scan, so DB defaults apply on first insert (hidden=0,
+    the rest NULL) and manual values survive every subsequent scan.
 
     server_host / server_path use COALESCE-on-null so a scan only overwrites them
     when it actually computed a non-null value. Registry-defined slugs stay
