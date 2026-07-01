@@ -2,7 +2,7 @@
 
 > **Repo:** https://github.com/k4rlski/repo-ctl
 > **Last updated:** 2026-06-30
-> **Status:** 🟢 v0.4 — core-v5 / Server / GitHub alignment tracker (v0.3 metadata/detail-page/refresh + v0.4 name/github_link, Stage/Role, soft-delete, MARS CRUD endpoints)
+> **Status:** 🟢 v0.5 — core-v5 / Server / GitHub alignment tracker (v0.3 metadata/detail-page/refresh + v0.4 name/github_link, Stage/Role, soft-delete, MARS CRUD + v0.5 statprod/tooltype columns, Refresh-all button, live Elasticsearch search)
 
 ---
 
@@ -255,3 +255,68 @@ v0.4 uses **direct writes** to the manual columns (no separate override columns)
 full **override-columns / DB-driven registry** (manual values in a dedicated layer
 that always wins over scanner values, replacing the YAML registry) remains a future
 option — [#9].
+
+---
+
+## 12. v0.5 — statprod/tooltype columns, Refresh-all, live Elasticsearch search
+
+### 12.1 Schema v0.5 (additive columns on `infra_ctl.repo_alignment`)
+
+| Column | Type | Source | Meaning |
+|--------|------|--------|---------|
+| `statprod` | VARCHAR(16) | manual (MARS) | at-a-glance **production/health status** (color dot) |
+| `tooltype` | VARCHAR(16) | manual (MARS) | **stack shape** (command-line / web / mobile / etc.) |
+
+Both are **editable, scanner-ignored** — **excluded from the upsert update-set** (same
+persistence contract as `hidden`/`statrepo`/`rolerepo`), so they **persist across
+scans**. Additive + idempotent (`ADD COLUMN IF NOT EXISTS`), **DB default NULL**.
+
+### 12.2 `statprod` — production/health status
+
+Rendered as a **16×16 color dot in the FIRST table column** and **sortable**:
+
+| Value | Color | Hex |
+|-------|-------|-----|
+| **Active** | neon green | `#39FF14` |
+| **Bug Fix** | bright red | `#FF1A1A` |
+| **Pending** | medium orange | `#FF8C00` |
+| **Inactive** | medium blue | `#2E7DD1` |
+| **Retire** | medium purple | `#9B59B6` |
+
+### 12.3 `tooltype` — stack shape
+
+Column **after Status**, **sortable**. Values: **Command Line**, **Web UI**,
+**CLI / Web**, **Mobile UI**, **All**.
+
+### 12.4 MARS UI (v0.5)
+
+- Both `statprod` (dot) and `tooltype` editable in the **detail popup "Edit (internal)"
+  card** via `POST /api/repo/update`, which **now validates `statprod`/`tooltype`** too
+  (against the allowed value sets above).
+- **Notes** cell font reduced to **7px** to keep the wide table readable.
+- **Refresh-all (GitHub+meta) button** on `/tools/repo-ctl`: a **client-side sequential
+  loop** over the **currently filtered rows** calling `GET /api/repo/refresh?slug=` one
+  at a time, with a **progress indicator + Cancel**. Refreshes **GitHub `ls-remote` +
+  RAG metadata ONLY** — **NOT** the Local/Server planes (those come from the twice-daily
+  **osiris `get-state` scan**, cron `50 7,19`). A true **full 4-plane web-triggered scan**
+  + a **rodan server-side refresh** remain deferred ([#11], [#3]).
+
+### 12.5 Elasticsearch search (LIVE)
+
+- **search-ctl** now indexes `infra_ctl.repo_alignment` into the ES index
+  **`repo_alignment`** (`search.permtrak.com:9200`) via **`index_repos.py`** on a
+  **`15 */6` cron** (search-ctl [#6]).
+- MARS surfaces it two ways:
+  - **`/adm/search-ctl`** — the ES **test dropdown** includes `repo_alignment`.
+  - **`/tools/repo-ctl`** — a **fuzzy ES search box** hitting
+    `GET /api/search/test?index=repo_alignment&q=`, with **graceful fallback to the
+    client-side filter** if ES is down.
+
+### 12.6 Issue refs
+
+| Issue | Scope |
+|-------|-------|
+| repo-ctl [#10] | `statprod` / `tooltype` columns + colors + validation |
+| repo-ctl [#11] | Refresh-all button (+ deferred full 4-plane / rodan server-refresh) |
+| search-ctl [#6] | `index_repos.py` → ES `repo_alignment` index |
+| chroma-ctl [#14] | stale 384-dim collections rebuilt to 768-dim |
