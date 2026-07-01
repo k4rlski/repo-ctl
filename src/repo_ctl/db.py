@@ -199,21 +199,22 @@ def upsert(conn, row):
     inserted or updated by a scan, so DB defaults apply on first insert (hidden=0,
     the rest NULL) and manual values survive every subsequent scan.
 
-    server_host / server_path use COALESCE-on-null so a scan only overwrites them
-    when it actually computed a non-null value. Registry-defined slugs stay
-    registry-authoritative; manual server edits for registry-less slugs survive.
+    server_host / server_path are SEED-ON-INSERT ONLY: they are inserted on the
+    first scan (seeded from the registry when known) but NEVER updated by a
+    subsequent scan, so operator edits made in the MARS UI are permanent for
+    every slug (including registry-defined ones). If a registry host/path later
+    changes, it becomes seed-only and won't auto-propagate; re-seed manually.
     """
     cols = [c for c in COLUMNS]
     placeholders = ", ".join(["%s"] * len(cols))
-    _coalesce = {"server_host", "server_path"}
+    # Written on INSERT (seed from registry) but excluded from the UPDATE set so
+    # a scan never clobbers a manual server host/path edit. Operator-owned.
+    _seed_only = {"server_host", "server_path"}
     update_parts = []
     for c in cols:
-        if c == "slug":
+        if c == "slug" or c in _seed_only:
             continue
-        if c in _coalesce:
-            update_parts.append(f"{c}=COALESCE(VALUES({c}), {c})")
-        else:
-            update_parts.append(f"{c}=VALUES({c})")
+        update_parts.append(f"{c}=VALUES({c})")
     updates = ", ".join(update_parts)
     sql = (
         f"INSERT INTO repo_alignment ({', '.join(cols)}) VALUES ({placeholders}) "
