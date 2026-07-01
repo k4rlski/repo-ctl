@@ -343,5 +343,41 @@ def refresh_alignment(obj, slug, metadata_only, no_server, no_db):
         raise click.ClickException(f"DB write failed: {e}")
 
 
+@cli.command("clone-local")
+@click.option("--host", default=None,
+              help="Target host queue to poll (default: this machine's short "
+                   "hostname; e.g. osiris|ares|raven)")
+@click.pass_obj
+def clone_local(obj, host):
+    """Pull-agent: claim + process ONE pending clone job for this host -> core-v5."""
+    from repo_ctl import clone as clonemod
+    host = (host or clonemod.short_host()).lower()
+
+    cfg = load_config_soft(obj.get("config_path"))
+    if not cfg.get("dbx"):
+        raise click.ClickException(
+            "No [dbx] config found; cannot poll clone jobs. Add a dbx: section "
+            f"to {CONFIG_FILE}")
+
+    try:
+        res = clonemod.run_poller(cfg, host)
+    except Exception as e:
+        raise click.ClickException(f"clone poll failed: {e}")
+
+    action = res.get("action")
+    if action == "noop":
+        click.echo(f"clone-local [{host}]: no pending jobs")
+        return
+    if action == "error":
+        raise click.ClickException(res.get("message", "clone poll error"))
+
+    slug = res.get("slug", "?")
+    icon = {"success": "✅", "skipped": "⏭️ ", "failed": "❌"}.get(action, "•")
+    click.echo(f"clone-local [{host}]: {icon} {slug} -> {action} — "
+               f"{res.get('message', '')}")
+    if not res.get("ok"):
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     cli()
