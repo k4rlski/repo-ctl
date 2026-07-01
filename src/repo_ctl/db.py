@@ -19,7 +19,7 @@ import pymysql
 
 
 COLUMNS = [
-    "slug", "repo",
+    "slug", "repo", "name", "github_link",
     "gh_default_branch", "gh_head_sha", "gh_head_date", "gh_pushed_at",
     "lf_path", "lf_exists", "lf_is_git", "lf_branch", "lf_head_sha",
     "lf_head_date", "lf_dirty", "lf_ahead", "lf_behind",
@@ -190,10 +190,30 @@ def compute_status(row):
 
 
 def upsert(conn, row):
-    """Idempotent upsert of one repo_alignment row (dict keyed by COLUMNS)."""
+    """
+    Idempotent upsert of one repo_alignment row (dict keyed by COLUMNS).
+
+    COLUMNS deliberately EXCLUDES the manually-curated fields (hidden, statrepo,
+    rolerepo): they are never inserted or updated by a scan, so DB defaults apply
+    on first insert (hidden=0, statrepo/rolerepo NULL) and manual values survive
+    every subsequent scan.
+
+    server_host / server_path use COALESCE-on-null so a scan only overwrites them
+    when it actually computed a non-null value. Registry-defined slugs stay
+    registry-authoritative; manual server edits for registry-less slugs survive.
+    """
     cols = [c for c in COLUMNS]
     placeholders = ", ".join(["%s"] * len(cols))
-    updates = ", ".join(f"{c}=VALUES({c})" for c in cols if c != "slug")
+    _coalesce = {"server_host", "server_path"}
+    update_parts = []
+    for c in cols:
+        if c == "slug":
+            continue
+        if c in _coalesce:
+            update_parts.append(f"{c}=COALESCE(VALUES({c}), {c})")
+        else:
+            update_parts.append(f"{c}=VALUES({c})")
+    updates = ", ".join(update_parts)
     sql = (
         f"INSERT INTO repo_alignment ({', '.join(cols)}) VALUES ({placeholders}) "
         f"ON DUPLICATE KEY UPDATE {updates}"

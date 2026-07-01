@@ -34,9 +34,12 @@ def build_row(slug, skip_server=False):
     else:
         srv = dict(_EMPTY, host=r["server_host"], path=r["server_path"])
 
+    repo = f"k4rlski/{r['repo']}"
     row = {
         "slug": slug,
-        "repo": f"k4rlski/{r['repo']}",
+        "repo": repo,
+        "name": repo.split("/")[-1],
+        "github_link": "https://github.com/" + repo,
         "gh_default_branch": gh["default_branch"],
         "gh_head_sha": gh["head_sha"],
         "gh_head_date": None,
