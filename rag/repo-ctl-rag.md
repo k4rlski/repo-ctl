@@ -1,8 +1,8 @@
 # repo-ctl RAG Knowledge Base
 
 > **Repo:** https://github.com/k4rlski/repo-ctl
-> **Last updated:** 2026-06-30
-> **Status:** 🟢 v0.5 — core-v5 / Server / GitHub alignment tracker (v0.3 metadata/detail-page/refresh + v0.4 name/github_link, Stage/Role, soft-delete, MARS CRUD + v0.5 statprod/tooltype columns, Refresh-all button, live Elasticsearch search)
+> **Last updated:** 2026-07-01
+> **Status:** 🟢 v0.6 — core-v5 / Server / GitHub alignment tracker (v0.3 metadata/detail-page/refresh + v0.4 name/github_link, Stage/Role, soft-delete, MARS CRUD + v0.5 statprod/tooltype columns, Refresh-all button, live Elasticsearch search + v0.6 Proposed Upgrades engine, Clone-to-Local pull-agent, top status strip, 1870px page)
 
 ---
 
@@ -68,7 +68,13 @@ repo-ctl list-repos | list-issues | check-rag | check-sync | check-latest-work |
 ls-remote, no server SSH) and no-ops if the slug has no row yet — meant to cheaply
 re-sync RAG/tool-page links after a CRUD edit. Run on osiris from the repo:
 `PYTHONPATH=src python3 -m repo_ctl.main get-state` (or installed entry point
-`repo-ctl`). Version **0.4.0**.
+`repo-ctl`). Version **0.6.0**.
+
+```bash
+# Clone-to-Local pull-agent (v0.6) — claim + process ONE pending clone job -> core-v5
+repo-ctl clone-local                      # poll this host's queue (short hostname)
+repo-ctl clone-local --host osiris        # poll a named host queue (osiris|ares|raven)
+```
 
 ---
 
@@ -76,18 +82,21 @@ re-sync RAG/tool-page links after a CRUD edit. Run on osiris from the repo:
 
 ```
 src/repo_ctl/
-  main.py            # Click CLI (get-state, refresh-alignment + legacy audit cmds)
+  main.py            # Click CLI (get-state, refresh-alignment, clone-local + legacy audit cmds)
   registry.py        # slug -> {github, server(host,path), local_current}; core-v5 discovery
   gh_remote.py       # token-free GitHub HEAD via `git ls-remote --symref`
   walker.py          # read-only local git state + RAG metadata/blob-link resolution
   ssh_probe.py       # read-only server git state over SSH (single batched probe)
   scan.py            # assemble one repo_alignment row (build_row / build_metadata_row)
+  clone.py           # v0.6 clone-local pull-agent (claim job -> guarded git clone -> rescan)
   tool_pages.py      # slug -> MARS dashboard page deep-link (mirrors ui-ctl.js nav)
   db.py              # dbx connect + upsert + update_metadata + compute_status
   github_client.py   # GitHub API v3 client (legacy audit cmds; needs a token)
   checks.py          # legacy check_rag/check_sync/check_latest_work/check_open_issues
 schema.sql           # repo_alignment base DDL (apply once into infra_ctl)
 schema_v3.sql        # v0.3 additive ALTERs (RAG meta, tool-page link, per-plane dates)
+schema_v6.sql        # v0.6 additive ALTERs (proposed_upgrades/enhancement_*/clonelocal) + clone job/log tables
+scripts/run-clone-poller.sh  # v0.6 flock-guarded cron wrapper for `clone-local` (*/2)
 config/repo-ctl.yml.example
 rag/repo-ctl-rag.md
 ```
@@ -171,8 +180,10 @@ checkout — git init/clone here", "stray git clone at … — consolidate into 
 - **Code home (server / source of truth):** rodan, `/opt/repo-ctl` (SSH GitHub
   remote; `venv` with `requests click pyyaml pymysql`).
 - **Local dev:** `core-v5/repo-ctl` on osiris.
-- **Schema:** apply `schema.sql` then `schema_v3.sql` once into `infra_ctl` (via the
-  claw path). v0.3 ALTERs are additive + idempotent (`ADD COLUMN IF NOT EXISTS`).
+- **Schema:** apply `schema.sql`, then `schema_v3.sql`, then `schema_v6.sql` once into
+  `infra_ctl` (via the claw path). All ALTERs are additive + idempotent
+  (`ADD COLUMN IF NOT EXISTS`); `schema_v6.sql` also creates `repo_clone_jobs` +
+  `repo_clone_log` (`CREATE TABLE IF NOT EXISTS`).
 - **Cadence:** osiris runs the sweep alongside the existing twice-daily ingest cron;
   the MARS page shows `scanned_at`.
 
@@ -320,3 +331,119 @@ Column **after Status**, **sortable**. Values: **Command Line**, **Web UI**,
 | repo-ctl [#11] | Refresh-all button (+ deferred full 4-plane / rodan server-refresh) |
 | search-ctl [#6] | `index_repos.py` → ES `repo_alignment` index |
 | chroma-ctl [#14] | stale 384-dim collections rebuilt to 768-dim |
+
+---
+
+## 13. v0.6 — Proposed Upgrades engine, Clone-to-Local pull-agent, status strip
+
+Adds a repo-centric **toolbox** layer: an operator "Proposed Upgrades" field backed
+by GitHub Enhancement issues, a **DB-poll pull-agent** that clones safe uncloned repos
+into `core-v5/<slug>`, a top **service status strip**, and a wider (**1870px**) page.
+Design record: **`~/.cursor/plans/repo-ctl_v0.6_f045ad5e.plan.md`**. Version **0.6.0**.
+
+### 13.1 Schema v0.6 (`schema_v6.sql`)
+
+New **operator-editable** columns on `infra_ctl.repo_alignment` — all
+**EXCLUDED from the scanner upsert** (same persistence contract as
+`hidden`/`statrepo`/`rolerepo`/`statprod`/`tooltype`), additive + idempotent
+(`ADD COLUMN IF NOT EXISTS`), DB default NULL:
+
+| Column | Type | Meaning |
+|--------|------|---------|
+| `proposed_upgrades` | TEXT | free-text upgrade/enhancement notes (stored like `notes`) |
+| `enhancement_issue_number` | INT | GitHub issue number created from Proposed Upgrades |
+| `enhancement_issue_url` | VARCHAR(255) | that issue's HTML URL |
+| `clonelocal` | VARCHAR(24) | chosen clone target (`Clone to Osiris`/`Ares`/`Raven` / '') — stamped on clone request |
+
+Two new tables (co-located in `infra_ctl`, keyed off the same `slug`):
+
+- **`repo_clone_jobs`** — the clone **trigger/queue**: `id`, `slug`,
+  `host DEFAULT 'osiris'`, `status DEFAULT 'pending'` (`pending`|`running`|`done`|`failed`|`skipped`),
+  `requested_by`, `claimed_by`, `claimed_at`, `finished_at`, `message`,
+  `created_at`; `KEY idx_pending(host,status)`, `KEY idx_slug(slug)`.
+- **`repo_clone_log`** — a **mirror of `search_ctl.reindex_log`**: `id`, `slug`,
+  `started_at`, `finished_at`, `duration_sec`, `status`, `error_msg`, `host`,
+  `created_at`.
+
+### 13.2 Proposed Upgrades engine
+
+- **Proposed Upgrades** is a free-text field on `/tools/repo-ctl` (edited like
+  **Notes** — column on the list, textarea in the detail popup) saved via
+  `POST /api/repo/update`.
+- A **"Create Enhancement Issue"** action opens a real GitHub issue labelled
+  **`enhancement`** from the field's text via MARS
+  `POST /api/repo/enhancement-issue`. That route uses MARS's own `GITHUB_TOKEN`
+  (from `/opt/mars-status/.env`) and calls `POST /api/github/issues/create` with a
+  new **`labels` pass-through**. The returned **issue number + URL** are stored back
+  on the row (`enhancement_issue_number` / `enhancement_issue_url`) and surfaced as a
+  linked-issue chip.
+
+### 13.3 Clone-to-Local pull-agent (`clone.py`)
+
+**Model = osiris PULLS.** claw can never reach the NAT'd workstation (no inbound), so
+claw only **writes a trigger row**; the workstation polls dbx and does the clone. A
+live SSE web-terminal is deferred to claw-reachable hosts.
+
+- **CLI:** `repo-ctl clone-local [--host osiris|ares|raven]` (defaults to this
+  machine's short hostname), run by cron **`*/2`** via
+  **`scripts/run-clone-poller.sh`** (`flock -n` guarded so an overrun never overlaps
+  the next tick; logs to `~/.local/log/repo-ctl-clone-poller.log`).
+- **Flow:**
+  1. MARS UI `POST /api/repo/clone {slug,host}` inserts a **`pending`** job and stamps
+     `clonelocal` on the row.
+  2. The poller **atomically claims** one oldest pending job (guarded
+     `UPDATE … WHERE status='pending'` + `rowcount==1`, so two cycles never both win).
+  3. Resolves dest via `registry.resolve` — `local_final` = `core-v5/<slug>`, URL =
+     `github_ssh` (`git@github.com:k4rlski/<repo>.git`).
+  4. **Guardrails:** dest must be **inside core-v5** (realpath containment); dest
+     **absent or empty** else **SKIP** ("manual consolidation"); remote must exist
+     (`ls_remote_head` re-probe) else **SKIP**; slug allowlist `[A-Za-z0-9._-]` and no
+     leading `-` (rejects path-traversal / option-injection).
+  5. Clones to a **temp sibling** dir then **atomic-renames** (`os.replace`) into place;
+     `git clone` has a 300s timeout, `BatchMode=yes`, `GIT_TERMINAL_PROMPT=0`.
+  6. Runs **scan + upsert** to flip `uncloned→aligned` immediately (best-effort — a
+     rescan hiccup never loses the good clone).
+  7. Writes a **`repo_clone_log`** row and finalizes the job
+     (`done`/`failed`/`skipped`). One job per invocation.
+- **UI status:** near-live via `GET /api/repo/clone-status?slug=` (latest job +
+  `repo_clone_log` tail).
+- **First-cut scope:** the **77** empty-dir + has-GitHub-repo repos (auto-clonable).
+  The **10** non-empty-with-repo (e.g. `bkup-ctl`, `job-board-ctl`, `stripe-ctl`) are
+  **flagged for manual consolidation** (never clobbered); the **18** with no GitHub
+  repo are **skipped**. Selection guard:
+  `alignment_status='uncloned' AND gh_head_sha IS NOT NULL AND (dir absent OR empty)`.
+
+### 13.4 MARS page (v0.6)
+
+- Page **widened to 1870px** (site convention ~1875px).
+- **Top service status strip** (badge pills): **ChromaDB** via
+  `GET /api/chromadb/status`, **MySQL** via `GET /api/search/health`, **Hermes** = a
+  **static placeholder** (no endpoint yet).
+- New **Proposed Upgrades** column (7px, like Notes) with a linked-issue chip; a
+  **Clone** button + near-live status on safe uncloned rows; detail popup adds the
+  Proposed Upgrades textarea + Create Enhancement Issue button and the `clonelocal`
+  dropdown (Clone to Osiris/Ares/Raven) with a Clone action + status view.
+
+### 13.5 API endpoints (mars-status, v0.6)
+
+| Method + path | Purpose |
+|---------------|---------|
+| `POST /api/repo/update {…, proposed_upgrades, clonelocal}` | now also saves Proposed Upgrades + `clonelocal` (enum-validated) |
+| `POST /api/repo/enhancement-issue {slug}` | create a GH issue (label `enhancement`) from `proposed_upgrades`; store number+URL back on the row |
+| `POST /api/github/issues/create {…, labels}` | now accepts a **`labels` pass-through** |
+| `POST /api/repo/clone {slug,host}` | insert a `pending` clone job + stamp `clonelocal` (validates uncloned + `gh_head_sha` present + dir empty/absent) |
+| `GET /api/repo/clone-status?slug=` | latest job + `repo_clone_log` tail for near-live UI |
+| `GET /api/chromadb/status`, `GET /api/search/health` | live badges for the status strip |
+
+Same contract as v0.4/v0.5: auth-gated, parameterized, never-500; manual edits do not
+touch `scanned_at`.
+
+### 13.6 Notes / deferred
+
+- Removal of the hardcoded PAT fallback (`helpers/github_helper.py`) + hardcoded DB
+  passwords (`repo_bp.py`, `dropbox_bp.py`) is tracked under **security-ctl#2**, not in
+  this build.
+- A persistent osiris→dbx tunnel (autossh / ControlMaster) to avoid per-poll SSH setup,
+  and a claw-reachable **live SSE clone terminal**, remain deferred.
+- Apply `schema_v6.sql` once into `infra_ctl` (via the claw path); additive +
+  idempotent.
