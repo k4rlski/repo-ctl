@@ -2,7 +2,7 @@
 
 > **Repo:** https://github.com/k4rlski/repo-ctl
 > **Last updated:** 2026-06-30
-> **Status:** 🟢 v0.3 — core-v5 / Server / GitHub alignment tracker (RAG + tool-page metadata, MARS detail page, single-repo refresh)
+> **Status:** 🟢 v0.4 — core-v5 / Server / GitHub alignment tracker (v0.3 metadata/detail-page/refresh + v0.4 name/github_link, Stage/Role, soft-delete, MARS CRUD endpoints)
 
 ---
 
@@ -68,7 +68,7 @@ repo-ctl list-repos | list-issues | check-rag | check-sync | check-latest-work |
 ls-remote, no server SSH) and no-ops if the slug has no row yet — meant to cheaply
 re-sync RAG/tool-page links after a CRUD edit. Run on osiris from the repo:
 `PYTHONPATH=src python3 -m repo_ctl.main get-state` (or installed entry point
-`repo-ctl`). Version **0.3.0**.
+`repo-ctl`). Version **0.4.0**.
 
 ---
 
@@ -193,3 +193,65 @@ checkout — git init/clone here", "stray git clone at … — consolidate into 
 Server = source of truth. The sweep is strictly read-only (no moves/pushes/fetches).
 Secret audit before committing. rodan hosts many other `/opt/*-ctl` tools — scope all
 work to `/opt/repo-ctl` only. No workarounds without review/approval.
+
+---
+
+## 11. v0.4 — name/github_link, Stage/Role, soft-delete, MARS CRUD
+
+### 11.1 Schema v0.4 (additive columns on `infra_ctl.repo_alignment`)
+
+| Column | Type | Source | Meaning |
+|--------|------|--------|---------|
+| `name` | VARCHAR | scanner-derived | repo display name |
+| `github_link` | VARCHAR | scanner-derived | `https://github.com/<repo>` |
+| `hidden` | TINYINT DEFAULT 0 | manual (MARS) | soft-delete / archive flag (1 = hidden) |
+| `statrepo` | VARCHAR(16) | manual (MARS) | internal **Stage**: `Concept` / `Dev` / `Prod` / `Retired` |
+| `rolerepo` | VARCHAR(24) | manual (MARS) | internal **Role**: `AI Admin` / `Biz Admin` / `Infrastructure` / `Operations` |
+
+All additive + idempotent (`ADD COLUMN IF NOT EXISTS`), same convention as
+`schema_v3.sql`.
+
+### 11.2 Scanner rules (persistence contract)
+
+- The scanner **fills** `name` + `github_link` on every sweep.
+- The scanner **NEVER touches** `hidden` / `statrepo` / `rolerepo` — these are
+  **excluded from the upsert column set**, so an archive flag and manual Stage/Role
+  reference values **persist across scans**.
+- `server_host` / `server_path` use **COALESCE-on-null**: a scan only overwrites them
+  when it has a non-null value, so manual edits for **REGISTRY-LESS slugs** (no
+  registry entry) survive a sweep. **Registry-defined slugs stay
+  registry-authoritative** (the registry value is non-null and wins).
+
+### 11.3 MARS UI (v0.4)
+
+Table columns:
+**Name** (→ detail popup) | **Repo** (→ clickable GitHub URL, opens new tab) |
+**Status** | **Stage** | **Role** | **GitHub** | **Server** | **Local-final** |
+**Local-current** | **Links** | **Notes** | **Action**.
+
+- **Stage** and **Role** columns are **sortable**.
+- A **"Show hidden"** toggle reveals soft-deleted (archived) rows.
+- **Detail popup** shows clickable: Tool page / Repo / GitHub default-branch
+  (`/tree/<branch>`) / RAG / RAG-link / GitHub path. It embeds an
+  **"Edit (internal)" CRUD card** (Server host, Server path, Stage, Role) with a
+  **Save** action and **Archive / Restore** toggle.
+
+### 11.4 API endpoints (mars-status `routes/repo_bp.py`, live)
+
+| Method + path | Purpose |
+|---------------|---------|
+| `GET /api/repo/alignment[?include_hidden=1]` | list rows (hidden excluded unless flag) |
+| `GET /api/repo/refresh?slug=` | claw-side GitHub + RAG-metadata refresh for one slug |
+| `POST /api/repo/update {slug,server_host,server_path,statrepo,rolerepo}` | save manual fields |
+| `POST /api/repo/archive {slug,hidden}` | soft-delete / restore |
+
+All endpoints are **auth-gated** (MARS Flask-Login), **parameterized** (no SQL
+injection), and **never-500** (defensive error handling). Note: `/api/repo/update`
+**intentionally does NOT touch `scanned_at`** — a manual edit is not a scan.
+
+### 11.5 Persistence caveat
+
+v0.4 uses **direct writes** to the manual columns (no separate override columns). A
+full **override-columns / DB-driven registry** (manual values in a dedicated layer
+that always wins over scanner values, replacing the YAML registry) remains a future
+option — [#9].

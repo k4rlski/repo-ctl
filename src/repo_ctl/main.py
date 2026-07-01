@@ -74,7 +74,7 @@ def resolve_repos(target: str, gh: GitHubClient) -> List[str]:
 
 
 @click.group()
-@click.version_option(version="0.3.0", prog_name="repo-ctl")
+@click.version_option(version="0.4.0", prog_name="repo-ctl")
 @click.option("--config", "-c", default=None, help="Config file path")
 @click.pass_context
 def cli(ctx, config):
